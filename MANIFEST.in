@@ -3,6 +3,7 @@ recursive-include pyfk *.pyx *.pxd
 recursive-include pyfk/tests/data *
 recursive-include tests *.py *.json *.npz
 recursive-include validation *.py *.sh
+recursive-include conda *.yaml *.sh *.bat
 
 global-exclude *.c *.cpp *.pyd *.so
 # The upstream test data includes a waveform named 50.grn.c.

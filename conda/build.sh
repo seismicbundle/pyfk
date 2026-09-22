@@ -1,5 +1,6 @@
 #!/bin/bash
 
-${PYTHON} -m pip install poetry-core@https://github.com/python-poetry/poetry-core/archive/refs/tags/1.1.0a7.zip
-# the pip version seems to be too old
-${PYTHON} -m pip install .
+if [ "$(uname)" = "Darwin" ]; then
+    export PYFK_LIBOMP_PREFIX="${PREFIX}"
+fi
+"${PYTHON}" -m pip install . --no-deps --no-build-isolation

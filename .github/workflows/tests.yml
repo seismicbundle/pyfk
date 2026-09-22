@@ -1,0 +1,95 @@
+name: tests
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  cpu:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ['3.10', '3.12', '3.13']
+    runs-on: ${{ matrix.os }}
+    env:
+      OMP_NUM_THREADS: '2'
+      PYFK_USE_CUDA: '0'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - if: runner.os == 'macOS'
+        run: brew install libomp
+      - run: python -m pip install build
+      - run: python -m build
+      - shell: bash
+        run: python -m pip install dist/*.whl pytest pytest-mpi
+      - name: Build independent native upstream reference
+        shell: bash
+        run: |
+          git clone --no-checkout https://github.com/ziyixi/pyfk.git "$RUNNER_TEMP/upstream-git"
+          python validation/prepare_upstream.py "$RUNNER_TEMP/upstream-git" "$RUNNER_TEMP/upstream-reference"
+          python -m venv "$RUNNER_TEMP/reference-env"
+          if [ "$RUNNER_OS" = Windows ]; then
+            REF_PYTHON="$RUNNER_TEMP/reference-env/Scripts/python.exe"
+          else
+            REF_PYTHON="$RUNNER_TEMP/reference-env/bin/python"
+          fi
+          "$REF_PYTHON" -m pip install "$RUNNER_TEMP/upstream-reference"
+          cd "$RUNNER_TEMP"
+          "$REF_PYTHON" "$GITHUB_WORKSPACE/validation/upstream_cases.py" "$RUNNER_TEMP/native-upstream.npz"
+          echo "PYFK_TEST_UPSTREAM_REFERENCE=$RUNNER_TEMP/native-upstream.npz" >> "$GITHUB_ENV"
+      - name: Test installed package away from checkout
+        shell: bash
+        run: cd "$RUNNER_TEMP" && python -m pytest --pyargs pyfk
+      - name: Test release regressions against installed package
+        shell: bash
+        run: cd "$RUNNER_TEMP" && python -m pytest "$GITHUB_WORKSPACE/tests" --import-mode=importlib
+  mpi:
+    runs-on: ubuntu-latest
+    env:
+      OMP_NUM_THREADS: '1'
+      PYFK_USE_CUDA: '0'
+      PYFK_USE_MPI: '1'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - run: sudo apt-get update && sudo apt-get install -y libopenmpi-dev openmpi-bin
+      - name: Build serial upstream reference for MPI comparison
+        shell: bash
+        env:
+          PYFK_USE_MPI: '0'
+        run: |
+          git clone --no-checkout https://github.com/ziyixi/pyfk.git "$RUNNER_TEMP/upstream-git"
+          python validation/prepare_upstream.py "$RUNNER_TEMP/upstream-git" "$RUNNER_TEMP/upstream-reference"
+          python -m venv "$RUNNER_TEMP/reference-env"
+          "$RUNNER_TEMP/reference-env/bin/python" -m pip install "$RUNNER_TEMP/upstream-reference"
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/reference-env/bin/python" "$GITHUB_WORKSPACE/validation/upstream_cases.py" "$RUNNER_TEMP/native-upstream.npz"
+          echo "PYFK_TEST_UPSTREAM_REFERENCE=$RUNNER_TEMP/native-upstream.npz" >> "$GITHUB_ENV"
+      - run: python -m pip install '.[mpi,test]'
+      - shell: bash
+        run: cd "$RUNNER_TEMP" && mpirun --oversubscribe -np 3 python -m pytest --with-mpi --pyargs pyfk
+      - shell: bash
+        run: cd "$RUNNER_TEMP" && mpirun --oversubscribe -np 3 python -m pytest "$GITHUB_WORKSPACE/tests/test_regression.py" --import-mode=importlib --with-mpi -m mpi
+  conda:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - run: python -m pip install build
+      - run: python -m build --sdist
+      - name: Build and test conda package from clean source
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/conda-validation/source"
+          tar -xzf dist/*.tar.gz -C "$RUNNER_TEMP/conda-validation/source" --strip-components=1
+          bash validation/conda.sh "$RUNNER_TEMP/conda-validation" "$RUNNER_TEMP/conda-validation/source"

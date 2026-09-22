@@ -1,6 +1,6 @@
 package:
   name: pyfk
-  version: "0.3.1"
+  version: "0.3.1+seismicbundle.1"
 
 source:
   path: ..
@@ -11,28 +11,41 @@ build:
 requirements:
   build:
     - {{ compiler('c') }}
+    - {{ compiler('cxx') }}
   host:
     - python {{ python }}
-    - numpy >=1.21
-    - scipy >=1.7
-    - obspy >=1.3
-    - cysignals >=1.11.2
-    - cython >=0.29.28
+    - pip
+    - setuptools >=77
+    - wheel
+    - numpy >=1.23,<2.5
+    - scipy >=1.10
+    - obspy >=1.4
+    - cython >=3.0,<3.4
+    - llvm-openmp  # [osx]
   run:
-    - python >=3.7,<3.10
-    - numpy >=1.21
-    - scipy >=1.7
-    - obspy >=1.3
-    - cysignals >=1.11.2
+    - python {{ python }}
+    - numpy >=1.23,<2.5
+    - scipy >=1.10
+    - obspy >=1.4
+    - llvm-openmp  # [osx]
 test:
+  source_files:
+    - tests
+    - validation
+    - pyproject.toml
   requires:
     - pytest
     - pytest-mpi
   imports:
     - pyfk
+  commands:
+    - python -m pytest --pyargs pyfk -q
+    - python -m pytest tests --import-mode=importlib -q
 
 about:
-  home: https://github.com/ziyixi/pyfk
+  home: https://github.com/seismicbundle/pyfk
   license: Apache-2.0
-  license_file: LICENSE
-  summary: Pyfk is the python version of FK used to calculate the Green's function and the synthetic waveforms for the 1D Earth model.
+  license_file:
+    - LICENSE
+    - NOTICE
+  summary: PyFK with OpenMP and GPU optimizations and an optional frequency ceiling (based on ziyixi/pyfk).
