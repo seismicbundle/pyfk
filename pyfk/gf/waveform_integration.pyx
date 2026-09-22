@@ -1,5 +1,5 @@
 #!python
-# cython: language_level=3, boundscheck=False, wraparound=False, cdivision=True, linetrace=True
+# cython: language_level=3, boundscheck=False, wraparound=False, cdivision=True, cpow=True, linetrace=True
 # note even we have linetrace=True, it still need to be enabled by
 # define_macros=[("CYTHON_TRACE_NOGIL", "1")]
 import numpy as np
@@ -7,7 +7,7 @@ import numpy as np
 from scipy.special.cython_special cimport jv
 from libc.math cimport pi, cos, sin, exp
 from pyfk.utils.complex cimport clog, csqrt, creal, cimag, conj
-from cysignals.signals cimport sig_on, sig_off
+from cpython.exc cimport PyErr_CheckSignals
 
 IF PYFK_USE_MPI == "1":
     from mpi4py import MPI
@@ -57,7 +57,6 @@ def _waveform_integration(
         epsilon,
         sigma,
         sum_waveform):
-    sig_on()
     _waveform_integration_sigin(
         nfft2,
         dw,
@@ -88,7 +87,6 @@ def _waveform_integration(
         epsilon,
         sigma,
         sum_waveform)
-    sig_off()
 
 
 cdef void _waveform_integration_sigin(int nfft2, double dw, double pmin, double dk, double kc, double pmax,
@@ -185,6 +183,8 @@ cdef void _waveform_integration_sigin(int nfft2, double dw, double pmin, double 
     ik = 0
     i = 0
     for ibool in range(rank, n_total, size):
+        if (ibool - rank) % (1024 * size) == 0:
+            PyErr_CheckSignals()
         # find current index ik and i
         for isearch in range(nfft2-wc1+1):
             if(n_list_accumulate[isearch] > ibool):

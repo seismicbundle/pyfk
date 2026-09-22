@@ -1,5 +1,5 @@
 #!python
-# cython: language_level=3, boundscheck=False, wraparound=False, cdivision=True, linetrace=True
+# cython: language_level=3, boundscheck=False, wraparound=False, cdivision=True, cpow=True, linetrace=True
 # note even we have linetrace=True, it still need to be enabled by
 # define_macros=[("CYTHON_TRACE_NOGIL", "1")]
 import numpy as np

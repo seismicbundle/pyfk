@@ -25,9 +25,11 @@ docs/_build/*
 docs/_static/*
 dist/*
 docs/autoapi/*
-!docs/_templates/layout.html
 
 token
 profile_pyfk/*
 
 cuda_test/*
+.venv*/
+*.pyd
+__pycache__/
