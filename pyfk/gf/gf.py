@@ -370,7 +370,8 @@ def waveform_integration(
             EPSILON,
             sigma,
             sum_waveform,
-            cuda_divide_num)
+            cuda_divide_num,
+            fmax=config.fmax)
     else:
         _waveform_integration(
             nfft2,
@@ -401,5 +402,6 @@ def waveform_integration(
             updn_mapper[config.updn],
             EPSILON,
             sigma,
-            sum_waveform)
+            sum_waveform,
+            fmax=config.fmax)
     return sum_waveform

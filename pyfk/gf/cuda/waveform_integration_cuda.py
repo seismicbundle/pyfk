@@ -7,6 +7,7 @@ from pyfk.gf.cuda.utils import (cal_cujn, compoundMatrix, cujn, eVector,
                                 haskellMatrix, initialG, initialZ, propagateB,
                                 propagateG, propagateZ, separatS, sh_ch)
 from pyfk.utils.error_message import PyfkError
+from pyfk.utils.options import frequency_bin_ceiling
 
 
 def _waveform_integration(
@@ -39,7 +40,12 @@ def _waveform_integration(
         epsilon: float,
         sigma: float,
         sum_waveform: np.ndarray,
-        cuda_divide_num: int):
+        cuda_divide_num: int,
+        fmax=None):
+    # * optional frequency ceiling, as in the CPU path; higher bins stay zero
+    nfft2 = frequency_bin_ceiling(nfft2, dw, fmax)
+    if nfft2 <= wc1 - 1:
+        return
     # * generate kp and ks array ((nfft2-wc1+1)*len(thickness))
     kp_list = np.zeros((nfft2-wc1+1, len(thickness)), dtype=complex)
     ks_list = np.zeros((nfft2-wc1+1, len(thickness)), dtype=complex)

@@ -10,6 +10,7 @@ from scipy.special.cython_special cimport jv
 from libc.math cimport pi, cos, sin, exp
 from pyfk.utils.complex cimport clog, csqrt, creal, cimag, conj
 from cpython.exc cimport PyErr_CheckSignals
+from pyfk.utils.options import frequency_bin_ceiling
 
 IF PYFK_USE_MPI == "1":
     from mpi4py import MPI
@@ -73,7 +74,8 @@ def _waveform_integration(
         updn,
         epsilon,
         sigma,
-        sum_waveform):
+        sum_waveform,
+        fmax=None):
     _waveform_integration_sigin(
         nfft2,
         dw,
@@ -103,7 +105,8 @@ def _waveform_integration(
         updn,
         epsilon,
         sigma,
-        sum_waveform)
+        sum_waveform,
+        frequency_bin_ceiling(nfft2, dw, fmax))
 
 
 cdef void _waveform_integration_sigin(int nfft2, double dw, double pmin, double dk, double kc, double pmax,
@@ -111,10 +114,12 @@ cdef void _waveform_integration_sigin(int nfft2, double dw, double pmin, double 
                                       double[:] vs, double[:] vp, double[:] qs, double[:] qp,
                                       bint flip, double filter_const, bint dynamic, int wc2, double[:] t0, int src_type,
                                       double taper, int wc, double[:] mu, double[:] thickness, double[:, :] si,
-                                      int src_layer, int rcv_layer, int updn, double epsilon, double sigma, double complex[:, :, :] sum_waveform):
+                                      int src_layer, int rcv_layer, int updn, double epsilon, double sigma, double complex[:, :, :] sum_waveform, int nfft2_top):
     # * init mpi
     # mpi.MPI_Init(NULL,NULL)
     cdef int size = 1, rank = 0
+    # nfft2_top is the exclusive upper frequency bin (nfft2 without a ceiling);
+    # bins above it keep their initial zeros.
     IF PYFK_USE_MPI == "1":
         cdef mpi.MPI_Comm comm = mpi.MPI_COMM_WORLD
         mpi.MPI_Comm_size(comm, & size)
@@ -160,7 +165,7 @@ cdef void _waveform_integration_sigin(int nfft2, double dw, double pmin, double 
     else:
         flip_val_list[:] = 1
 
-    for ik in range(wc1 - 1+rank, nfft2, size):
+    for ik in range(wc1 - 1+rank, nfft2_top, size):
         kc2 = kc**2
         omega = ik * dw
         w = omega - sigma * 1j
@@ -187,7 +192,7 @@ cdef void _waveform_integration_sigin(int nfft2, double dw, double pmin, double 
         n_list[:] = n_list_each_rank[:]
 
     # * get n_total and n_list_accumulate
-    for ik in range(wc1 - 1, nfft2):
+    for ik in range(wc1 - 1, nfft2_top):
         n = n_list[ik-wc1+1]
         n_total = n_total+n
         n_list_accumulate[ik-wc1+1] = n_total
@@ -201,7 +206,7 @@ cdef void _waveform_integration_sigin(int nfft2, double dw, double pmin, double 
         int n_max = 0
         double[:, :, ::1] jv_table
     if use_jv_table:
-        for ik in range(wc1 - 1, nfft2):
+        for ik in range(wc1 - 1, nfft2_top):
             if n_list[ik-wc1+1] > n_max:
                 n_max = n_list[ik-wc1+1]
     jv_table = np.zeros((n_max, len(receiver_distance), 3), dtype=np.float64)
@@ -248,8 +253,8 @@ cdef void _waveform_integration_sigin(int nfft2, double dw, double pmin, double 
         # in the serial order, so the result is bit-identical to the serial
         # loop. chunksize=1 balances the cost, which grows with frequency.
         # Signals are checked between batches of 32 bins.
-        for batch_start in range(wc1 - 1, nfft2, 32):
-            batch_end = min(batch_start + 32, nfft2)
+        for batch_start in range(wc1 - 1, nfft2_top, 32):
+            batch_end = min(batch_start + 32, nfft2_top)
             for ik in prange(batch_start, batch_end, nogil=True, schedule='static',
                              chunksize=1, num_threads=n_pool):
                 tid = threadid()
@@ -392,7 +397,7 @@ cdef void _waveform_integration_sigin(int nfft2, double dw, double pmin, double 
     ELSE:
         sum_waveform_all[:, :, :] = sum_waveform[:, :, :]
 
-    for ik in range(wc1 - 1, nfft2):
+    for ik in range(wc1 - 1, nfft2_top):
         omega = ik * dw
         # * for each ik, we apply the filtering and apply the time shift in the frequency domain
         filtering = filter_const

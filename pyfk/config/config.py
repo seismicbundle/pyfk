@@ -9,6 +9,7 @@ from obspy.geodetics.base import degrees2kilometers
 from pyfk.config.radiats import dc_radiat, mt_radiat, sf_radiat
 from pyfk.setting import R_EARTH
 from pyfk.utils.error_message import PyfkError, PyfkWarning
+from pyfk.utils.options import resolve_fmax
 
 
 class SeisModel(object):
@@ -428,7 +429,9 @@ class Config(object):
                  updn: str = "all",
                  samples_before_first_arrival: int = 50,
                  suppression_sigma: float = 2.,
-                 cuda: bool = False) -> None:
+                 cuda: bool = False,
+                 *,
+                 fmax: Optional[float] = None) -> None:
         """
         The configuration class used in generating Green's function and the synthetic waveform.
 
@@ -470,6 +473,8 @@ class Config(object):
         :type suppression_sigma: float, optional
         :param cuda: whether to use the cuda mode. if set PYFK_USE_CUDA=1, this flag will be ignored and will always use cuda, defaults to False
         :type cuda: bool
+        :param fmax: upper integration frequency in Hz; None reads PYFK_FMAX_HZ,
+            zero disables the ceiling. Resolved when Config is constructed.
         :raises PyfkError: Must provide a list of receiver distance
         :raises PyfkError: Can't set receiver distance as 0, please consider to use a small value instead
         :raises PyfkError: planet_radius should be positive
@@ -489,6 +494,7 @@ class Config(object):
         :raises PyfkError: Must provide a source
         :raises PyfkError: Must provide a seisModel
         """
+        self.fmax = resolve_fmax(fmax)
         # * read in and validate parameters
         # receiver_distance
         if receiver_distance is None:
@@ -624,4 +630,4 @@ class Config(object):
         return idep + 1
 
     def __repr__(self) -> str:
-        return f"Config(model={self.model.__repr__()}, source={self.source.__repr__()}, receiver_distance={self.receiver_distance}, taper={self.taper}, filter={self.filter}, npt={self.npt}, dt={self.dt}, dk={self.dk}, smth={self.smth}, pmin={self.pmin}, pmax={self.pmax}, kmax={self.kmax}, rdep={self.rdep}, updn={self.updn}, samples_before_first_arrival={self.samples_before_first_arrival}, suppression_sigma={self.suppression_sigma})"
+        return f"Config(model={self.model.__repr__()}, source={self.source.__repr__()}, receiver_distance={self.receiver_distance}, taper={self.taper}, filter={self.filter}, npt={self.npt}, dt={self.dt}, dk={self.dk}, smth={self.smth}, pmin={self.pmin}, pmax={self.pmax}, kmax={self.kmax}, rdep={self.rdep}, updn={self.updn}, samples_before_first_arrival={self.samples_before_first_arrival}, suppression_sigma={self.suppression_sigma}, fmax={self.fmax})"
