@@ -10,6 +10,7 @@ from pyfk.config.config import Config, SeisModel
 from pyfk.gf.waveform_integration import _waveform_integration
 from pyfk.setting import EPSILON
 from pyfk.taup.taup import taup
+from pyfk.utils.options import cuda_chunk_count
 
 
 def calculate_gf(config: Optional[Config] = None) -> Union[List[Stream], List[Stream]]:
@@ -329,9 +330,16 @@ def waveform_integration(
 
     PYFK_USE_CUDA = os.getenv("PYFK_USE_CUDA", "")
     if config.cuda == True or PYFK_USE_CUDA == "1":
+        cuda_divide_num = cuda_chunk_count()
+        try:
+            from numba import cuda
+            import cupy  # noqa: F401
+        except ImportError as exc:
+            raise ImportError("CUDA mode requires the cuda extra (pip install '.[cuda]') and an NVIDIA driver") from exc
+        if not cuda.is_available():
+            raise RuntimeError("CUDA requested but no usable NVIDIA CUDA device is available")
         from pyfk.gf.cuda.waveform_integration_cuda import \
             _waveform_integration as _waveform_integration_cuda
-        cuda_divide_num = int(os.getenv("CUDA_DIVIDE_NUM", "1"))
         _waveform_integration_cuda(
             nfft2,
             dw,

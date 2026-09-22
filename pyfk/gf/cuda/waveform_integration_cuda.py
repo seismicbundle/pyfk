@@ -1,8 +1,9 @@
 # write cuda kernels with numba, parallel for each ibool
 
+import cupy as cp
 import numpy as np
 from numba import complex128, cuda, njit
-from pyfk.gf.cuda.utils import (cal_cujn, compoundMatrix, eVector,
+from pyfk.gf.cuda.utils import (cal_cujn, compoundMatrix, cujn, eVector,
                                 haskellMatrix, initialG, initialZ, propagateB,
                                 propagateG, propagateZ, separatS, sh_ch)
 from pyfk.utils.error_message import PyfkError
@@ -48,74 +49,113 @@ def _waveform_integration(
     n_list_accumulate: np.ndarray = np.zeros(nfft2-wc1+1, dtype=int)
     get_n_list_kpks(wc1, nfft2, kc, dw, pmin, pmax, dk, sigma, thickness, vp, vs, qp, qs,
                     n_list, n_list_accumulate, kp_list, ks_list)
-    n_all: int = n_list_accumulate[-1]
+    n_all: int = int(n_list_accumulate[-1])
+
+    # * tabulate the Bessel functions on the device
+    # With pmin == 0 the wavenumber grid does not depend on the frequency (see
+    # the CPU module). The tables and sum_waveform stay on the device until
+    # all chunks are done. Other pmin values keep the host projection.
+    use_table = pmin == 0.0
+    if use_table:
+        n_max = int(np.max(n_list))
+        k_table = (0.5 + np.arange(n_max, dtype=np.float64)) * dk
+        z_table = k_table[:, np.newaxis] * \
+            np.asarray(receiver_distance, dtype=np.float64)[np.newaxis, :]
+        z_table_d = cp.asarray(z_table)
+        aj0_table_d = cujn(0, z_table_d)
+        aj1_table_d = cujn(1, z_table_d)
+        aj2_table_d = cujn(2, z_table_d)
+        sum_waveform_d = cuda.to_device(sum_waveform)
+
+    flip_val = -1. if flip else 1.
+
+    # * inputs shared by every chunk, uploaded once
+    n_list_d = cuda.to_device(n_list)
+    n_list_accumulate_d = cuda.to_device(n_list_accumulate)
+    kp_list_d = cuda.to_device(kp_list)
+    ks_list_d = cuda.to_device(ks_list)
+    thickness_d = cuda.to_device(thickness)
+    mu_d = cuda.to_device(mu)
+    si_d = cuda.to_device(si)
+
+    # same partition as np.array_split(range(n_all), cuda_divide_num),
+    # without building the range
+    chunk_len = n_all // cuda_divide_num
+    chunk_rem = n_all % cuda_divide_num
 
     for index_cuda_divide in range(cuda_divide_num):
         # * current index_cuda_divide info
-        current_range_list = np.array_split(range(n_all), cuda_divide_num)[
-            index_cuda_divide]
-        current_n_all = len(current_range_list)
-        current_offset = current_range_list[0]
+        if index_cuda_divide < chunk_rem:
+            current_n_all = chunk_len + 1
+        else:
+            current_n_all = chunk_len
+        if current_n_all == 0:
+            continue
+        current_offset = index_cuda_divide * chunk_len + \
+            min(index_cuda_divide, chunk_rem)
 
-        # * generate the ik and i list representing the i wavenumber and i frequency
-        ik_list = np.zeros(current_n_all, dtype=int)
-        i_list = np.zeros(current_n_all, dtype=int)
-
-        # * call fill_vals cuda kernel
         threadsperblock = 128
         blockspergrid = (current_n_all + (threadsperblock - 1)
                          ) // threadsperblock
 
-        ik_list_d = cuda.to_device(ik_list)
-        i_list_d = cuda.to_device(i_list)
-        fill_vals[blockspergrid, threadsperblock](
-            n_list, n_list_accumulate, ik_list_d, i_list_d, wc1, nfft2, current_n_all, current_offset)
-        ik_list = ik_list_d.copy_to_host()
-        i_list = i_list_d.copy_to_host()
-
-        # * initialize the big matrix u (current_n_all*3*3)
-        u: np.ndarray = np.zeros((current_n_all, 3, 3), dtype=complex)
-
-        # * init cuda arrays
-        # u, ik_list, i_list, kp, ks, thickness, mu, si
+        # * device arrays owned by this chunk: u, ik_list, i_list
         try:
-            u_d = cuda.to_device(u)
-            ik_list_d = cuda.to_device(ik_list)
-            i_list_d = cuda.to_device(i_list)
-            kp_list_d = cuda.to_device(kp_list)
-            ks_list_d = cuda.to_device(ks_list)
-            thickness_d = cuda.to_device(thickness)
-            mu_d = cuda.to_device(mu)
-            si_d = cuda.to_device(si)
-        except cuda.cudadrv.driver.CudaAPIError:
-            from sys import getsizeof
-            total_size = getsizeof(u)+getsizeof(ik_list)+getsizeof(i_list)+getsizeof(
-                kp_list)+getsizeof(ks_list)+getsizeof(thickness)+getsizeof(mu)+getsizeof(si)
+            ik_list_d = cp.zeros(current_n_all, dtype=int)
+            i_list_d = cp.zeros(current_n_all, dtype=int)
+            u_d = cp.zeros((current_n_all, 3, 3), dtype=complex)
+        except cp.cuda.memory.OutOfMemoryError as err:
             raise PyfkError(
-                f"You are creating {total_size} MB data, try to make CUDA_DIVIDE_NUM larger!")
+                "Not enough GPU memory for this chunk, try to make CUDA_DIVIDE_NUM larger!") from err
+
+        # * generate the ik and i list representing the i wavenumber and i frequency
+        fill_vals[blockspergrid, threadsperblock](
+            n_list_d, n_list_accumulate_d, ik_list_d, i_list_d, wc1, nfft2, current_n_all, current_offset)
 
         # * run the cuda kernel function
         parallel_kernel[blockspergrid, threadsperblock](u_d, ik_list_d, i_list_d, kp_list_d, ks_list_d, thickness_d, mu_d, si_d,
                                                         dw, pmin, dk, src_layer, rcv_layer, updn, src_type, epsilon, wc1, current_n_all)
-        u = u_d.copy_to_host()
 
         # * get sum_waveform
-        flip_val = 0
-        if flip:
-            flip_val = -1.
+        if use_table:
+            # position range of each frequency bin, clipped to this chunk
+            first_bin = int(np.searchsorted(
+                n_list_accumulate, current_offset, side="right"))
+            last_bin = int(np.searchsorted(
+                n_list_accumulate, current_offset + current_n_all - 1,
+                side="right"))
+            bin_index = np.arange(first_bin, last_bin + 1, dtype=np.int64)
+            bin_ik = bin_index + wc1 - 1
+            bin_starts = np.maximum(
+                n_list_accumulate[bin_index] - n_list[bin_index]
+                - current_offset, 0)
+            bin_ends = np.minimum(
+                n_list_accumulate[bin_index] - current_offset, current_n_all)
+            nrec = len(receiver_distance)
+            bin_ik_d = cuda.to_device(bin_ik)
+            bin_starts_d = cuda.to_device(bin_starts)
+            bin_ends_d = cuda.to_device(bin_ends)
+            get_sum_waveform_bins[len(bin_index), (32, 7)](
+                sum_waveform_d, u_d, i_list_d, z_table_d, aj0_table_d,
+                aj1_table_d, aj2_table_d, bin_ik_d, bin_starts_d,
+                bin_ends_d, flip_val, nrec)
         else:
-            flip_val = 1.
+            ik_list = cp.asnumpy(ik_list_d)
+            i_list = cp.asnumpy(i_list_d)
+            u = cp.asnumpy(u_d)
+            z_list = np.zeros(
+                (current_n_all, len(receiver_distance)), dtype=float)
+            get_z_list(z_list, ik_list, i_list, receiver_distance,
+                       dw, pmin, dk, current_n_all)
+            aj0_list = cal_cujn(0, z_list)
+            aj1_list = cal_cujn(1, z_list)
+            aj2_list = cal_cujn(2, z_list)
+            # it's not appropriate to use cuda here, as it will use large atomic operation.
+            get_sum_waveform(sum_waveform, u, ik_list, receiver_distance,  flip_val,
+                             z_list, aj0_list, aj1_list, aj2_list, current_n_all)
 
-        z_list = np.zeros(
-            (current_n_all, len(receiver_distance)), dtype=float)
-        get_z_list(z_list, ik_list, i_list, receiver_distance,
-                   dw, pmin, dk, current_n_all)
-        aj0_list = cal_cujn(0, z_list)
-        aj1_list = cal_cujn(1, z_list)
-        aj2_list = cal_cujn(2, z_list)
-        # it's not appropriate to use cuda here, as it will use large atomic operation.
-        get_sum_waveform(sum_waveform, u, ik_list, receiver_distance,  flip_val,
-                         z_list, aj0_list, aj1_list, aj2_list, current_n_all)
+    if use_table:
+        # * copy the projected spectrum back to the host
+        sum_waveform_d.copy_to_host(sum_waveform)
 
     # * perform the filtering
     apply_filter(wc1, nfft2, dw, filter_const, dynamic, wc, taper, wc2,
@@ -150,12 +190,20 @@ def fill_vals(n_list: np.ndarray, n_list_accumulate: np.ndarray, ik_list: np.nda
     pos = cuda.grid(1)
     if pos < current_n_all:
         ibool = pos+current_offset
-        for isearch in range(nfft2-wc1+1):
-            if(n_list_accumulate[isearch] > ibool):
-                ik_list[pos] = isearch+wc1 - 1
-                i_list[pos] = ibool - \
-                    (n_list_accumulate[isearch]-n_list[isearch])
-                break
+        # first index with n_list_accumulate[index] > ibool; the array is
+        # nondecreasing, so the binary search lands on the same index a
+        # linear scan would find, and ibool < n_list_accumulate[-1]
+        # guarantees it exists
+        lo = 0
+        hi = nfft2 - wc1
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if n_list_accumulate[mid] > ibool:
+                hi = mid
+            else:
+                lo = mid + 1
+        ik_list[pos] = lo + wc1 - 1
+        i_list[pos] = ibool - (n_list_accumulate[lo] - n_list[lo])
 
 
 @njit("void(float64[:,:],int64[:],int64[:],float64[:],float64,float64,float64,int64)")
@@ -196,6 +244,98 @@ def get_sum_waveform(sum_waveform, u, ik_list, receiver_distance,  flip_val,
                 aj2 * flip_val
             sum_waveform[irec, 7, ik] += u[pos, 2, 1] * aj1 - nf
             sum_waveform[irec, 8, ik] += u[pos, 2, 2] * aj1 - nf
+
+
+@cuda.jit("void(complex128[:,:,:],complex128[:,:,:],int64[:],float64[:,:],float64[:,:],float64[:,:],float64[:,:],int64[:],int64[:],int64[:],float64,int64)")
+def get_sum_waveform_bins(sum_waveform, u, i_list, z_table, aj0_table,
+                          aj1_table, aj2_table, bin_ik, bin_starts, bin_ends,
+                          flip_val, nrec):
+    # One block per frequency bin, one warp per component group (0, 1, 2, 3,
+    # 4+5, 6, 7+8), one lane per receiver. Each output element is summed by
+    # one thread in the order of the host loop, continuing from the stored
+    # value when a bin is split across chunks.
+    ibin = cuda.blockIdx.x
+    start = bin_starts[ibin]
+    end = bin_ends[ibin]
+    if start < end:
+        ik = bin_ik[ibin]
+        group = cuda.threadIdx.y
+        for irec in range(cuda.threadIdx.x, nrec, 32):
+            if group == 0:
+                acc = sum_waveform[irec, 0, ik]
+                for pos in range(start, end):
+                    aj0 = aj0_table[i_list[pos], irec]
+                    acc = acc + u[pos, 0, 0] * aj0 * flip_val
+                sum_waveform[irec, 0, ik] = acc
+            elif group == 1:
+                acc = sum_waveform[irec, 1, ik]
+                for pos in range(start, end):
+                    aj1 = aj1_table[i_list[pos], irec]
+                    acc = acc + -u[pos, 0, 1] * aj1
+                sum_waveform[irec, 1, ik] = acc
+            elif group == 2:
+                acc = sum_waveform[irec, 2, ik]
+                for pos in range(start, end):
+                    aj1 = aj1_table[i_list[pos], irec]
+                    acc = acc + -u[pos, 0, 2] * aj1
+                sum_waveform[irec, 2, ik] = acc
+            elif group == 3:
+                acc = sum_waveform[irec, 3, ik]
+                for pos in range(start, end):
+                    aj1 = aj1_table[i_list[pos], irec]
+                    acc = acc + u[pos, 1, 0] * aj1 * flip_val
+                sum_waveform[irec, 3, ik] = acc
+            elif group == 4:
+                acc4 = sum_waveform[irec, 4, ik]
+                acc5 = sum_waveform[irec, 5, ik]
+                for pos in range(start, end):
+                    i = i_list[pos]
+                    z = z_table[i, irec]
+                    aj0 = aj0_table[i, irec]
+                    aj1 = aj1_table[i, irec]
+                    nf = (u[pos, 1, 1] + u[pos, 1, 2]) * aj1 / z
+                    acc4 = acc4 + (u[pos, 1, 1] * aj0 - nf)
+                    acc5 = acc5 + (u[pos, 1, 2] * aj0 - nf)
+                sum_waveform[irec, 4, ik] = acc4
+                sum_waveform[irec, 5, ik] = acc5
+            elif group == 5:
+                acc = sum_waveform[irec, 6, ik]
+                for pos in range(start, end):
+                    aj2 = aj2_table[i_list[pos], irec]
+                    acc = acc + u[pos, 2, 0] * aj2 * flip_val
+                sum_waveform[irec, 6, ik] = acc
+            else:
+                acc7 = sum_waveform[irec, 7, ik]
+                acc8 = sum_waveform[irec, 8, ik]
+                for pos in range(start, end):
+                    i = i_list[pos]
+                    z = z_table[i, irec]
+                    aj1 = aj1_table[i, irec]
+                    aj2 = aj2_table[i, irec]
+                    nf = 2. * (u[pos, 2, 1] + u[pos, 2, 2]) * aj2 / z
+                    acc7 = acc7 + (u[pos, 2, 1] * aj1 - nf)
+                    acc8 = acc8 + (u[pos, 2, 2] * aj1 - nf)
+                sum_waveform[irec, 7, ik] = acc7
+                sum_waveform[irec, 8, ik] = acc8
+
+
+# Disable fused multiply-add contraction in the projection kernel so it rounds
+# like the host code. Numba has no public option for this, so the private
+# NVVM options are set and the compiled caches are cleared. The check below
+# fails at import if the generated code still contains FP64 FMA instructions.
+for _definition in get_sum_waveform_bins.overloads.values():
+    _lib = _definition.library
+    _lib._nvvm_options["fma"] = False
+    for _name in ("_ptx_cache", "_cubin_cache", "_cufunc_cache"):
+        _cur = getattr(_lib, _name, None)
+        if isinstance(_cur, dict):
+            _cur.clear()
+        else:
+            setattr(_lib, _name, None)
+_asm = "\n".join(str(_a) for _a in get_sum_waveform_bins.inspect_asm().values())
+if "fma.rn.f64" in _asm:
+    raise RuntimeError("CUDA projection contraction detected; install the pinned pyfk[cuda] dependencies")
+del _definition, _lib, _asm
 
 
 @njit("void(int64,int64,float64,float64,boolean,int64,float64,int64,float64[:],float64[:],complex128[:,:,:])")
@@ -372,3 +512,4 @@ def parallel_kernel(u, ik_list, i_list, kp_list, ks_list, thickness, mu, si,
             u[pos, index, 0] = u[pos, index, 0] + val * zzz[index, 1] / rayl
             u[pos, index, 1] = u[pos, index, 1] + val * zzz[index, 0] / rayl
             u[pos, index, 2] = u[pos, index, 2] + val * zzz[index, 4] / love
+
