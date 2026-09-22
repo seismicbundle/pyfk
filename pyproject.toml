@@ -23,7 +23,8 @@ test = ["pytest>=7.4", "pytest-mpi>=0.6"]
 Upstream = "https://github.com/ziyixi/pyfk"
 
 [tool.pytest.ini_options]
-testpaths = ["pyfk/tests"]
+testpaths = ["pyfk/tests", "tests"]
+markers = ["cuda: requires an explicitly requested CUDA validation run"]
 
 [tool.setuptools.package-data]
 pyfk = ["**/*.pyx", "**/*.pxd", "tests/data/**/*"]

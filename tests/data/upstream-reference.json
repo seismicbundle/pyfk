@@ -1,0 +1,198 @@
+{
+  "exports": [
+    "SourceModel",
+    "SeisModel",
+    "Config",
+    "calculate_gf",
+    "calculate_sync",
+    "generate_source_time_function",
+    "mpi_info"
+  ],
+  "parameters": {
+    "SourceModel": [
+      {
+        "name": "sdep",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "default": "0.0"
+      },
+      {
+        "name": "srcType",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "default": "'dc'"
+      },
+      {
+        "name": "source_mechanism",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "default": "None"
+      }
+    ],
+    "SeisModel": [
+      {
+        "name": "model",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "default": "None"
+      },
+      {
+        "name": "flattening",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "default": "False"
+      },
+      {
+        "name": "use_kappa",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "default": "False"
+      },
+      {
+        "name": "r_planet",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "default": "None"
+      }
+    ],
+    "Config": [
+      {
+        "name": "model",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "default": "None"
+      },
+      {
+        "name": "source",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "default": "None"
+      },
+      {
+        "name": "receiver_distance",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "default": "None"
+      },
+      {
+        "name": "planet_radius",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "default": "6371.0"
+      },
+      {
+        "name": "degrees",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "default": "False"
+      },
+      {
+        "name": "taper",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "default": "0.3"
+      },
+      {
+        "name": "filter",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "default": "(0, 0)"
+      },
+      {
+        "name": "npt",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "default": "256"
+      },
+      {
+        "name": "dt",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "default": "1.0"
+      },
+      {
+        "name": "dk",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "default": "0.3"
+      },
+      {
+        "name": "smth",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "default": "1.0"
+      },
+      {
+        "name": "pmin",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "default": "0.0"
+      },
+      {
+        "name": "pmax",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "default": "1.0"
+      },
+      {
+        "name": "kmax",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "default": "15.0"
+      },
+      {
+        "name": "rdep",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "default": "0.0"
+      },
+      {
+        "name": "updn",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "default": "'all'"
+      },
+      {
+        "name": "samples_before_first_arrival",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "default": "50"
+      },
+      {
+        "name": "suppression_sigma",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "default": "2.0"
+      },
+      {
+        "name": "cuda",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "default": "False"
+      }
+    ],
+    "calculate_gf": [
+      {
+        "name": "config",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "default": "None"
+      }
+    ],
+    "calculate_sync": [
+      {
+        "name": "gf",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "default": "<class 'inspect._empty'>"
+      },
+      {
+        "name": "config",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "default": "<class 'inspect._empty'>"
+      },
+      {
+        "name": "az",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "default": "0"
+      },
+      {
+        "name": "source_time_function",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "default": "None"
+      }
+    ],
+    "generate_source_time_function": [
+      {
+        "name": "dura",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "default": "0.0"
+      },
+      {
+        "name": "rise",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "default": "0.5"
+      },
+      {
+        "name": "delta",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "default": "0.1"
+      }
+    ],
+    "mpi_info": []
+  },
+  "version": "0.3.1",
+  "upstream_commit": "810e77dee6e7fe12ebac41832dfc17e6b7bab29f"
+}

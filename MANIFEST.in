@@ -1,6 +1,8 @@
 include build_backend.py LICENSE NOTICE
 recursive-include pyfk *.pyx *.pxd
 recursive-include pyfk/tests/data *
+recursive-include tests *.py *.json *.npz
+recursive-include validation *.py *.sh
 
 global-exclude *.c *.cpp *.pyd *.so
 # The upstream test data includes a waveform named 50.grn.c.
