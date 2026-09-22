@@ -371,7 +371,8 @@ def waveform_integration(
             sigma,
             sum_waveform,
             cuda_divide_num,
-            fmax=config.fmax)
+            fmax=config.fmax,
+            mixed_precision=config.mixed_precision)
     else:
         _waveform_integration(
             nfft2,

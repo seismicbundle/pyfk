@@ -39,6 +39,14 @@ def frequency_bin_ceiling(nfft2, dw, fmax=None):
     return min(nfft2, last + 1)
 
 
+def resolve_mixed_precision(value):
+    if value is None:
+        return os.getenv("PYFK_MIXED_FP32", "0") == "1"
+    if not isinstance(value, bool):
+        raise PyfkError("mixed_precision must be True, False, or None")
+    return value
+
+
 def cuda_chunk_count():
     try:
         count = int(os.getenv("CUDA_DIVIDE_NUM", "1"))
