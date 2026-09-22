@@ -1,67 +1,62 @@
 .. _parallel:
 
 Parallelization
-==========
+===============
 
-Why are we using ``PyFK``? You may think it's more pythonic and can tolerant the possible inefficiency. However, with the parallelization, it can be much faster than you may think.
+Only the Green's function calculation is parallelized. The synthetics are a
+convolution with the source time function and take little time.
 
-The idea to parallelize the FK algorithm is simple, based on `The introduction from Seisman (In Chinese) <https://blog.seisman.info/fk-notes/>`__, we know the simulate consists of two levels of the loop, one is for the frequency, and another is for the wavenumber. So these two loops can be flattened to one large loop and apply parallelism. 
+OpenMP threads
+--------------
 
-The parallelization is designed only to calculate the Green's function as it's the most time-consuming part. The calculation of the synthetic waveforms is only about convolving the source, which is much faster.
+With ``pmin=0`` in a single process, the CPU integration runs on OpenMP
+threads. ``OMP_NUM_THREADS`` sets their number; the default is the number of
+processors. OpenMP is available with MSVC and GCC, and with Apple clang when
+libomp is installed. The results do not depend on the number of threads. With
+MPI or a nonzero ``pmin``, each process runs on one thread.
 
-MPI Mode
--------------------
+MPI
+---
 
-To use the MPI mode, you have to compile from the source with the environment ``PYFK_USE_MPI`` set as 1. The reason for this design is that the MPI mode relies on ``mpi4py``, which has the dependency of the system-provided MPI package. Everything should be compiled in the local machine, not to mention we are using MPI inside Cython. 
+Build with ``PYFK_USE_MPI=1`` (see :ref:`install`). A script that calls
+``calculate_gf`` then splits the frequency loop across the processes when it
+is started with ``mpirun``, without changes to the script::
 
-After successfully installing ``PyFK`` with the MPI support. You can directly use it to perform the simulation. Assume we have a Python script::
+    mpirun -np 4 python script.py
 
-    import numpy as np
-    import obspy
-    from pyfk.config.config import Config, SeisModel, SourceModel
-    from pyfk.gf.gf import calculate_gf
-    from pyfk.tests.taup.test_taup import TestFunctionTaup
+Every process receives the full result. See the
+`mpi4py documentation <https://mpi4py.readthedocs.io/en/stable/>`__ for
+restricting further processing to one rank.
 
-    model_data = SeisModel(model=TestFunctionTaup.gen_test_model("prem"))
-    source = SourceModel(sdep=15)
-        config = Config(
-        model=model,
-        source=source,
-        npt=512,
-        dt=0.1,
-        receiver_distance=[
-            10,
-            20,
-            30])
+GPU
+---
 
-    result = calculate_gf(config)
+``Config(cuda=True)`` or ``PYFK_USE_CUDA=1`` runs the integration on an NVIDIA
+GPU. It requires the ``cuda`` extra (see :ref:`install`). Numba compiles the
+kernels on the first call in a process, so that call is slower.
 
-This script loads the PREM model and calculates Green's function based on our setting. It is the same as the serial mode, but when ``calculate_gf`` detects it's called by ``mpirun``, it will automatically be run with MPI. The calculated Green's function is broadcasted to all the processes, and can be further processed by only considering the main process such as setting ``rank==0``. I will not talk about this part which should be introduced in `The document of mpi4py <https://mpi4py.readthedocs.io/en/stable/>`__. 
+With ``pmin=0``, the wavenumber integration and the Bessel projection stay on
+the GPU and only the final spectrum is copied back to the host. With a nonzero
+``pmin``, the projection runs on the host as in upstream PyFK.
 
+If the GPU runs out of memory, set ``CUDA_DIVIDE_NUM`` to split the
+calculation into that many parts (default 1). ``CUDA_VISIBLE_DEVICES`` selects
+the GPU.
 
-GPU mode
+``Config(mixed_precision=True)`` or ``PYFK_MIXED_FP32=1`` runs the layer
+propagation in single precision for the frequencies where an overflow estimate
+allows it. It is experimental and off by default.
+
+Frequency ceiling
 -----------------
 
-The GPU mode can be enabled by passing ``cuda=True`` in ``Config``, or set the system environment ``PYFK_USE_CUDA`` as 1. ``PYFK_USE_CUDA`` will only be read during the calculation, which has no relationship with the package installation part. Either ``cuda=True`` or ``PYFK_USE_CUDA`` will enable the GPU mode.
+``Config(fmax=...)`` or ``PYFK_FMAX_HZ`` stops the frequency loop at ``fmax``
+Hz, on the CPU and the GPU. The number of wavenumbers grows with the
+frequency, so the time saved is larger than the fraction of frequencies
+removed.
 
-To enable the GPU mode, additional packages are required, including Numba and CuPy. Note these packages are not automatically installed by ``pip`` or ``conda`` to avoid the unnecessary package dependencies. Numba is used to compile the CUDA kernel, while CuPy provides additional functions to calculate the special functions on GPU, which is used in this package.
-
-For future versions, these dependencies might be removed by directly using CUDA.
-
-For consistency, you don't have to make any additional modifications to the existing code. As long as the GPU mode is enabled, the calculation of Green's function will be automatically on GPU. It's suggested to perform benchmark before migrating to GPU, as smaller jobs might not be worthy.
-
-There might have a problem that the GPU memory is not big enough. It's possible as we first generate all the information before performing the two-loop integration, then move all the info to GPU. A workaround to this problem is to divide the large memory information into small subsets; after one subset has finished calculation, we move another one. ``PyFK`` has provided a system environment variable named ``CUDA_DIVIDE_NUM``. If this environment has not been set, its value will be one, which means there will only be one subset. Try to make this value larger when there is not enough GPU memory.
-
-The bottleneck of the GPU calculation is the data moving. Currently, there is no better way to solve this problem; using thread is not the way to go as the actual calculation on GPU is pretty fast. So it's not surprising if you look at the system monitor, and the GPU efficiency is only 0%, although we know it's running on GPU and it's fast. Look at the GPU memory usage, and you will get that we are using GPU.
-
-Usage tips
-^^^^^^^^^^^^^^^^
-There is also the possibility that the cluster has multiple GPUs installed, try to use ``nvidia-smi`` to find the free GPU that doesn't have much memory allocated, and at the start of your simulation script, put::
-
-    from numba import cuda
-    # select the second GPU for example (start from 0)
-    cuda.select_device(1)
-
-It will use the second GPU instead of the first one.
-
-Since PyFK uses numba to compile CUDA kernel with JIT, it also might be slower when running the code for the first time. Please be aware of that when performing the benchmark.
+The ceiling cuts the integrated spectrum without a taper. It changes the
+waveform, including the onset, and can flip a first motion near a nodal plane.
+The output is not band-limited: the exp(σt) correction after the inverse FFT
+(``suppression_sigma``) spreads the change above and below ``fmax``, most near
+the end of the trace. ``fmax=0`` means no ceiling.

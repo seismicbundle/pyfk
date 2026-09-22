@@ -1,8 +1,10 @@
 include build_backend.py LICENSE NOTICE
+include docs/validation.rst docs/introduction/install.rst
 recursive-include pyfk *.pyx *.pxd
 recursive-include pyfk/tests/data *
 recursive-include tests *.py *.json *.npz
 recursive-include validation *.py *.sh
+recursive-include benchmarks *.py
 recursive-include conda *.yaml *.sh *.bat
 
 global-exclude *.c *.cpp *.pyd *.so

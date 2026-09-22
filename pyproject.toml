@@ -5,13 +5,14 @@ backend-path = ["."]
 
 [project]
 name = "pyfk"
-version = "0.3.1"
-description = "Pyfk is the python version of FK used to calculate the Green's function and the synthetic waveforms for the 1D Earth model."
+version = "0.3.1+seismicbundle.1"
+description = "PyFK with OpenMP and GPU optimizations and an optional frequency ceiling"
 readme = "README.rst"
 requires-python = ">=3.10,<3.14"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 authors = [{name = "Ziyi Xi", email = "xiziyi2015@gmail.com"}]
+maintainers = [{name = "SeismicBundle"}]
 dependencies = ["numpy>=1.23,<2.5", "scipy>=1.10", "obspy>=1.4"]
 
 [project.optional-dependencies]
@@ -20,6 +21,7 @@ cuda = ["numba==0.67.0", "numba-cuda[cu12]==0.30.4", "cupy-cuda12x==14.2.0"]
 test = ["pytest>=7.4", "pytest-mpi>=0.6"]
 
 [project.urls]
+Repository = "https://github.com/seismicbundle/pyfk"
 Upstream = "https://github.com/ziyixi/pyfk"
 
 [tool.pytest.ini_options]

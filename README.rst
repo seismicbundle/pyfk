@@ -1,78 +1,118 @@
-PyFK
-==========
-
-.. image:: https://github.com/ziyixi/pyfk/workflows/pyfk/badge.svg
-    :target: https://github.com/ziyixi/pyfk/actions
-
-.. image:: https://codecov.io/gh/ziyixi/pyfk/branch/master/graph/badge.svg?token=5EL7IDTYLJ
-    :target: https://codecov.io/gh/ziyixi/pyfk
-
-.. image:: https://img.shields.io/badge/docs-dev-blue.svg
-    :target: https://pyfk.ziyixi.science/
-
-.. image:: https://badge.fury.io/py/pyfk.svg
-    :target: https://badge.fury.io/py/pyfk
-
-.. image:: https://anaconda.org/ziyixi/pyfk/badges/version.svg
-    :target: https://anaconda.org/ziyixi/pyfk
-
-.. image:: https://anaconda.org/ziyixi/pyfk/badges/platforms.svg
-    :target: https://github.com/ziyixi/pyfk
+PyFK, SeismicBundle version
+===========================
 
 .. placeholder-for-doc-index
 
-About
--------------
+This is a modified version of `PyFK <https://github.com/ziyixi/pyfk>`__ by Ziyi Xi,
+the Python port of Lupei Zhu's `FK <http://www.eas.slu.edu/People/LZhu/home.html>`__
+code for Green's functions and synthetic seismograms in layered 1D models.
+The upstream API is unchanged; ``Config`` has two new keyword arguments.
+The changes:
 
-PyFK is the python port of `FK <http://www.eas.slu.edu/People/LZhu/home.html>`__ used to calculate the Green's function and the synthetic waveforms for the 1D Earth model.
+* CPU integration: with ``pmin=0`` the Bessel functions are tabulated once
+  instead of being evaluated for every frequency, and the frequency loop runs
+  on OpenMP threads. With the default options the results are byte-identical
+  to upstream.
+* GPU integration: the wavenumber integration and the Bessel projection stay
+  on the GPU until the spectrum is complete.
+* Optional frequency ceiling: ``Config(fmax=10.)`` integrates up to 10 Hz only.
+* Optional mixed precision on the GPU (experimental).
+* Windows support (MSVC), Python 3.10 to 3.13, a setuptools build, and no
+  ``cysignals`` dependency.
 
-The main features of this package are:
+Speed
+-----
 
-* Compute the Green's function for the explosion, single force, and double couple source using the frequency-wavenumber method.
-* Compute the static displacements and corresponding Green's function.
-* Compute the synthetic waveforms by convolving Green's function with the seismic source.
-* Use the seismic data format of Obspy, which is easy to perform the signal processing.
+Time of one ``calculate_gf`` call on the CPU (AMD Ryzen 9 7900, 12 cores),
+without a frequency ceiling: 9 layers over a halfspace, source depth 9 km,
+23 receivers, ``dt=0.01``. The parameters are in ``benchmarks/timing.py``.
 
-And the package is unique as:
-
-* all the code is written in pure python, and it's compatible with Unix-like systems including Mac and Linux. The Windows is not supported, as the package uses the complex number in Cython, which uses the C99 standard of "complex.h" that has not been supported by the Visual Studio compiler.
-* it uses Cython to speed up the computationally expensive part (mainly the wavenumber integration).
-* The package has also provided three modes:
-  
-    * Serial mode: the serial version implements the FK algorithm in Python.
-    * Parallel mode on CPU: the wavenumber integration can be paralleled by MPI. 
-    * Parallel mode on GPU: the wavenumber integration can also be paralleled by CUDA on GPU.
+========================  ====================  ======================
+\                         8192 points, 2-30 km  16384 points, 5-130 km
+========================  ====================  ======================
+upstream PyFK, 1 process  144 s                 1083 s
+this version, 1 thread    47 s                  439 s
+this version, 12 threads  12 s                  109 s
+========================  ====================  ======================
 
 Installation
--------------
+------------
 
-The serial version and the parallel version on GPU can be simply installed using pip:
+::
 
-.. code-block:: bash
+    git clone https://github.com/seismicbundle/pyfk.git
+    cd pyfk
+    python -m pip install .           # CPU
+    python -m pip install ".[cuda]"   # with GPU support
 
-    pip install pyfk
+A C compiler is required. On macOS, install ``libomp`` for multithreading.
+MPI, conda and tests: ``docs/introduction/install.rst``.
 
-Or conda::
+New options
+-----------
 
-    conda install -c ziyixi pyfk
+.. code-block:: python
 
-It's also easy to install the MPI enabled version::
+    import numpy as np
+    from pyfk import Config, SeisModel, SourceModel, calculate_gf
 
-    PYFK_USE_MPI=1 pip install pyfk[mpi]
+    # thickness (km), vs, vp (km/s), density (g/cm^3), Qs, Qp
+    model = np.array([[10., 3.4, 5.8, 2.6, 600., 1200.],
+                      [0., 3.8, 6.5, 2.8, 600., 1200.]])
+    config = Config(model=SeisModel(model=model), source=SourceModel(sdep=8.),
+                    receiver_distance=[10., 20.], npt=8192, dt=0.01,
+                    fmax=10.)  # frequency ceiling in Hz
+    gf = calculate_gf(config)
 
-Extra packages including `numba <https://numba.readthedocs.io/en/stable/user/installing.html>`__ and `cupy <https://docs.cupy.dev/en/stable/install.html>`__ will be required to enable the GPU mode. For more details about the Installation, you can refer to the Installing part of the document.
+    # GPU, optionally with mixed precision
+    config = Config(model=SeisModel(model=model), source=SourceModel(sdep=8.),
+                    receiver_distance=[10., 20.], npt=8192, dt=0.01,
+                    cuda=True, mixed_precision=True)
+    gf = calculate_gf(config)
 
-Todo
-------------------
-The current bugs to fix or features to provide are listed in `TODO <https://github.com/ziyixi/pyfk/issues/5>`__.
+``fmax``
+    Highest frequency integrated, in Hz. The sampling and the trace headers do
+    not change. ``0`` means no ceiling; ``PYFK_FMAX_HZ`` sets the default.
+
+``mixed_precision``
+    Run the layer propagation on the GPU in single precision for the
+    frequencies where an overflow estimate allows it; the others stay in double
+    precision. ``PYFK_MIXED_FP32=1`` sets the default.
+
+``OMP_NUM_THREADS``
+    Number of CPU threads. The default is the number of processors.
+
+Limitations
+-----------
+
+* The frequency ceiling cuts the integrated spectrum without a taper. It
+  changes the waveform, including the onset, and can flip a first motion near
+  a nodal plane. The output is not band-limited: the exp(σt) correction after
+  the inverse FFT (``suppression_sigma``) spreads the change above and below
+  ``fmax``, most near the end of the trace.
+* Mixed precision is experimental. Its error is checked on the test cases
+  only.
+* The GPU path requires the versions pinned in the ``cuda`` extra, because it
+  sets private Numba compiler options.
+* Threads are used in a single process with ``pmin=0``. With MPI or a nonzero
+  ``pmin``, each process runs on one thread.
+
+Tested platforms and the comparison with upstream: ``docs/validation.rst``.
 
 Citation
-------------------
-Xi, Z., Li, J., Chen, M. and Wei, S., 2021, December. PyFK: A Fast MPI and CUDA Accelerated Python Package for Calculating Synthetic Seismograms Based on the Frequencywavenumber Method. In AGU Fall Meeting Abstracts (Vol. 2021, pp. S15E-0288).
+--------
+
+Please cite the original PyFK:
+
+Xi, Z., Li, J., Chen, M. and Wei, S., 2021, December. PyFK: A Fast MPI and CUDA
+Accelerated Python Package for Calculating Synthetic Seismograms Based on the
+Frequency-wavenumber Method. In AGU Fall Meeting Abstracts (Vol. 2021,
+pp. S15E-0288).
+
+If you used this version, please also give the repository URL,
+https://github.com/seismicbundle/pyfk.
 
 License
 -------
 
-PyFK is a free software: you can redistribute it and modify it under the terms of
-the **Apache License**. A copy of this license is provided in
-`LICENSE <https://github.com/ziyixi/pyfk/blob/master/LICENSE>`__.
+Apache License 2.0 (``LICENSE``). See ``NOTICE``.

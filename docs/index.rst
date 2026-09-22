@@ -45,6 +45,13 @@ Ph.D. advisors Prof. Min Chen and Prof. Songqiao Shawn Wei for supporting my stu
 .. toctree::
     :maxdepth: 2
     :hidden:
+    :caption: Validation
+
+    validation.rst
+
+.. toctree::
+    :maxdepth: 2
+    :hidden:
     :caption: Benchmark
 
     benchmark/benchmark.rst
