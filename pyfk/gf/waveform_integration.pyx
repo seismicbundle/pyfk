@@ -608,7 +608,7 @@ cdef inline void separatS(double complex[:, ::1] sss, int updn, int src_type, do
                 ctemp = 0. + 0.j
                 for jmat in range(4):
                     ctemp = ctemp + si[imat, jmat] * \
-                        temppp.T[jmat, kmat]
+                        temppp[kmat, jmat]
                 sss[imat, kmat] = ctemp / 2.
             sss[imat, 4] = (si[imat, 4] + temp_sh * si[imat, 5]) / 2.
             sss[imat, 5] = (si[imat, 5] + si[imat, 4] / temp_sh) / 2.
