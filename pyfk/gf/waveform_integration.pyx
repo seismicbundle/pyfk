@@ -1,9 +1,11 @@
 #!python
-# cython: language_level=3, boundscheck=False, wraparound=False, cdivision=True, cpow=True, linetrace=True
-# note even we have linetrace=True, it still need to be enabled by
-# define_macros=[("CYTHON_TRACE_NOGIL", "1")]
+# cython: language_level=3, boundscheck=False, wraparound=False, cdivision=True, cpow=True
+# linetrace is not enabled: its tracing macros do not compile inside prange.
+import os
+
 import numpy as np
 
+from cython.parallel cimport prange, threadid
 from scipy.special.cython_special cimport jv
 from libc.math cimport pi, cos, sin, exp
 from pyfk.utils.complex cimport clog, csqrt, creal, cimag, conj
@@ -25,6 +27,21 @@ ELSE:
         var = f"MPI is not used."
         print(var)
         return var
+
+
+def _team_size():
+    """Number of OpenMP threads and of per-thread scratch slots.
+
+    Follows OMP_NUM_THREADS (first entry), otherwise the processor count.
+    The value is also passed as num_threads, so thread ids stay below it.
+    """
+    try:
+        requested = int(os.environ.get("OMP_NUM_THREADS", "").split(",")[0])
+    except ValueError:
+        requested = 0
+    if requested > 0:
+        return requested
+    return max(os.cpu_count() or 1, 1)
 
 
 def _waveform_integration(
@@ -104,7 +121,7 @@ cdef void _waveform_integration_sigin(int nfft2, double dw, double pmin, double 
         mpi.MPI_Comm_rank(comm, & rank)
 
     cdef:
-        int ik, idep, n, i, irec, flip_val, icom
+        int ik, idep, n, i, irec, flip_val, icom, batch_start, batch_end
         double ztemp, k, kc2, omega, z, aj0, aj1, aj2, filtering, phi
         double complex w, att, atttemp, nf
     # * init some arrays
@@ -175,74 +192,194 @@ cdef void _waveform_integration_sigin(int nfft2, double dw, double pmin, double 
         n_total = n_total+n
         n_list_accumulate[ik-wc1+1] = n_total
 
+    # * tabulate the Bessel functions
+    # With pmin == 0, k = (0.5 + i) * dk does not depend on the frequency, so
+    # jv(n, k * r) is computed once per (i, receiver). The values are the same
+    # doubles the in-loop calls return. Other pmin values evaluate in the loop.
+    cdef:
+        bint use_jv_table = (pmin == 0.0)
+        int n_max = 0
+        double[:, :, ::1] jv_table
+    if use_jv_table:
+        for ik in range(wc1 - 1, nfft2):
+            if n_list[ik-wc1+1] > n_max:
+                n_max = n_list[ik-wc1+1]
+    jv_table = np.zeros((n_max, len(receiver_distance), 3), dtype=np.float64)
+    for i in range(n_max):
+        k = (0.5 + i) * dk
+        for irec in range(len(receiver_distance)):
+            z = k * receiver_distance[irec]
+            jv_table[i, irec, 0] = jv(0., z)
+            jv_table[i, irec, 1] = jv(1., z)
+            jv_table[i, irec, 2] = jv(2., z)
+
+    # * per-thread scratch arrays, indexed by threadid()
+    # The frequency loop is threaded for a single MPI rank with pmin == 0;
+    # other cases use the serial loop below.
+    cdef:
+        bint use_threads = (size == 1 and use_jv_table)
+        int n_pool, tid
+        double complex[:, :, ::1] u_pool, aaa_pool, bbb_pool, ccc_pool
+        double complex[:, ::1] eee_pool, ggg_pool, ggg_temp_pool
+        double complex[:, :, ::1] zzz_pool, sss_pool, temppp_pool
+        double complex[:, :, ::1] zzz_temp_pool, bbb_temp_pool
+    if use_threads:
+        n_pool = _team_size()
+        u_pool = np.zeros((n_pool, 3, 3), dtype=complex)
+        aaa_pool = np.zeros((n_pool, 5, 5), dtype=complex)
+        bbb_pool = np.zeros((n_pool, 7, 7), dtype=complex)
+        ccc_pool = np.zeros((n_pool, 7, 7), dtype=complex)
+        eee_pool = np.zeros((n_pool, 7), dtype=complex)
+        ggg_pool = np.zeros((n_pool, 7), dtype=complex)
+        zzz_pool = np.zeros((n_pool, 3, 5), dtype=complex)
+        sss_pool = np.zeros((n_pool, 3, 6), dtype=complex)
+        temppp_pool = np.zeros((n_pool, 4, 4), dtype=complex)
+        ggg_temp_pool = np.zeros((n_pool, 7), dtype=complex)
+        zzz_temp_pool = np.zeros((n_pool, 3, 5), dtype=complex)
+        bbb_temp_pool = np.zeros((n_pool, 7, 7), dtype=complex)
+
     # * we can run the code in parallel for n_total tasks
     # we run n_total loops, then map back
     cdef:
         Py_ssize_t ibool, isearch
 
-    ik = 0
-    i = 0
-    for ibool in range(rank, n_total, size):
-        if (ibool - rank) % (1024 * size) == 0:
+    if use_threads:
+        # Each prange iteration owns one frequency bin and sums its wavenumbers
+        # in the serial order, so the result is bit-identical to the serial
+        # loop. chunksize=1 balances the cost, which grows with frequency.
+        # Signals are checked between batches of 32 bins.
+        for batch_start in range(wc1 - 1, nfft2, 32):
+            batch_end = min(batch_start + 32, nfft2)
+            for ik in prange(batch_start, batch_end, nogil=True, schedule='static',
+                             chunksize=1, num_threads=n_pool):
+                tid = threadid()
+                omega = ik * dw
+                for i in range(n_list[ik-wc1+1]):
+                    k = omega * pmin + (0.5+i) * dk
+                    kernel(
+                        k,
+                        u_pool[tid],
+                        kp_list[ik-wc1+1, :],
+                        ks_list[ik-wc1+1, :],
+                        aaa_pool[tid],
+                        bbb_pool[tid],
+                        ccc_pool[tid],
+                        eee_pool[tid],
+                        ggg_pool[tid],
+                        zzz_pool[tid],
+                        sss_pool[tid],
+                        temppp_pool[tid],
+                        mu,
+                        si,
+                        thickness,
+                        src_type,
+                        src_layer,
+                        rcv_layer,
+                        updn,
+                        epsilon,
+                        # temp
+                        ggg_temp_pool[tid],
+                        zzz_temp_pool[tid],
+                        bbb_temp_pool[tid])
+                    for irec in range(len(receiver_distance)):
+                        z = k * receiver_distance[irec]
+                        aj0 = jv_table[i, irec, 0]
+                        aj1 = jv_table[i, irec, 1]
+                        aj2 = jv_table[i, irec, 2]
+                        # do the numerical integration here
+                        sum_waveform[irec, 0, ik] += u_pool[tid, 0, 0] * \
+                            aj0 * flip_val_list[ik-wc1+1]
+                        sum_waveform[irec, 1, ik] += -u_pool[tid, 0, 1] * aj1
+                        sum_waveform[irec, 2, ik] += -u_pool[tid, 0, 2] * aj1
+
+                        nf = (u_pool[tid, 1, 1] + u_pool[tid, 1, 2]) * aj1 / z
+                        sum_waveform[irec, 3, ik] += u_pool[tid, 1, 0] * \
+                            aj1 * flip_val_list[ik-wc1+1]
+                        sum_waveform[irec, 4, ik] += u_pool[tid, 1, 1] * aj0 - nf
+                        sum_waveform[irec, 5, ik] += u_pool[tid, 1, 2] * aj0 - nf
+
+                        nf = 2. * (u_pool[tid, 2, 1] + u_pool[tid, 2, 2]) * aj2 / z
+                        sum_waveform[irec, 6, ik] += u_pool[tid, 2, 0] * \
+                            aj2 * flip_val_list[ik-wc1+1]
+                        sum_waveform[irec, 7, ik] += u_pool[tid, 2, 1] * aj1 - nf
+                        sum_waveform[irec, 8, ik] += u_pool[tid, 2, 2] * aj1 - nf
             PyErr_CheckSignals()
-        # find current index ik and i
-        for isearch in range(nfft2-wc1+1):
-            if(n_list_accumulate[isearch] > ibool):
+
+    else:
+        ik = 0
+        i = 0
+        # find current index ik and i; ibool only increases, so the search
+        # resumes from the previous bin
+        isearch = 0
+        ibool = rank
+        with nogil:
+            while ibool < n_total:
+                if (ibool - rank) % (1024 * size) == 0:
+                    with gil:
+                        PyErr_CheckSignals()
+                while n_list_accumulate[isearch] <= ibool:
+                    isearch = isearch + 1
                 ik = isearch+wc1 - 1
                 i = ibool-(n_list_accumulate[isearch]-n_list[isearch])
-                break
 
-        omega = ik * dw
-        k = omega * pmin + (0.5+i) * dk
+                omega = ik * dw
+                k = omega * pmin + (0.5+i) * dk
 
-        # * run kernel
-        kernel(
-            k,
-            u,
-            kp_list[ik-wc1+1, :],
-            ks_list[ik-wc1+1, :],
-            aaa,
-            bbb,
-            ccc,
-            eee,
-            ggg,
-            zzz,
-            sss,
-            temppp,
-            mu,
-            si,
-            thickness,
-            src_type,
-            src_layer,
-            rcv_layer,
-            updn,
-            epsilon,
-            # temp
-            ggg_temp,
-            zzz_temp,
-            bbb_temp)
-        for irec in range(len(receiver_distance)):
-            z = k * receiver_distance[irec]
-            aj0 = jv(0., z)
-            aj1 = jv(1., z)
-            aj2 = jv(2., z)
-            # do the numerical integration here
-            sum_waveform[irec, 0, ik] += u[0, 0] * \
-                aj0 * flip_val_list[ik-wc1+1]
-            sum_waveform[irec, 1, ik] += -u[0, 1] * aj1
-            sum_waveform[irec, 2, ik] += -u[0, 2] * aj1
+                # * run kernel
+                kernel(
+                    k,
+                    u,
+                    kp_list[ik-wc1+1, :],
+                    ks_list[ik-wc1+1, :],
+                    aaa,
+                    bbb,
+                    ccc,
+                    eee,
+                    ggg,
+                    zzz,
+                    sss,
+                    temppp,
+                    mu,
+                    si,
+                    thickness,
+                    src_type,
+                    src_layer,
+                    rcv_layer,
+                    updn,
+                    epsilon,
+                    # temp
+                    ggg_temp,
+                    zzz_temp,
+                    bbb_temp)
+                for irec in range(len(receiver_distance)):
+                    z = k * receiver_distance[irec]
+                    if use_jv_table:
+                        aj0 = jv_table[i, irec, 0]
+                        aj1 = jv_table[i, irec, 1]
+                        aj2 = jv_table[i, irec, 2]
+                    else:
+                        aj0 = jv(0., z)
+                        aj1 = jv(1., z)
+                        aj2 = jv(2., z)
+                    # do the numerical integration here
+                    sum_waveform[irec, 0, ik] += u[0, 0] * \
+                        aj0 * flip_val_list[ik-wc1+1]
+                    sum_waveform[irec, 1, ik] += -u[0, 1] * aj1
+                    sum_waveform[irec, 2, ik] += -u[0, 2] * aj1
 
-            nf = (u[1, 1] + u[1, 2]) * aj1 / z
-            sum_waveform[irec, 3, ik] += u[1, 0] * \
-                aj1 * flip_val_list[ik-wc1+1]
-            sum_waveform[irec, 4, ik] += u[1, 1] * aj0 - nf
-            sum_waveform[irec, 5, ik] += u[1, 2] * aj0 - nf
+                    nf = (u[1, 1] + u[1, 2]) * aj1 / z
+                    sum_waveform[irec, 3, ik] += u[1, 0] * \
+                        aj1 * flip_val_list[ik-wc1+1]
+                    sum_waveform[irec, 4, ik] += u[1, 1] * aj0 - nf
+                    sum_waveform[irec, 5, ik] += u[1, 2] * aj0 - nf
 
-            nf = 2. * (u[2, 1] + u[2, 2]) * aj2 / z
-            sum_waveform[irec, 6, ik] += u[2, 0] * \
-                aj2 * flip_val_list[ik-wc1+1]
-            sum_waveform[irec, 7, ik] += u[2, 1] * aj1 - nf
-            sum_waveform[irec, 8, ik] += u[2, 2] * aj1 - nf
+                    nf = 2. * (u[2, 1] + u[2, 2]) * aj2 / z
+                    sum_waveform[irec, 6, ik] += u[2, 0] * \
+                        aj2 * flip_val_list[ik-wc1+1]
+                    sum_waveform[irec, 7, ik] += u[2, 1] * aj1 - nf
+                    sum_waveform[irec, 8, ik] += u[2, 2] * aj1 - nf
+
+                ibool += size
 
     # * we need to gather sum_waveform together and sum them together
     cdef double complex[:, :, :] sum_waveform_all = np.zeros(
@@ -281,9 +418,9 @@ cdef void kernel(double k, double complex[:, ::1] u, double complex[::1] kp, dou
                  double[:] mu, double[:, :] si, double[:] thickness, int src_type, int src_layer, int rcv_layer,
                  int updn, double epsilon,
                  # temps
-                 double complex[::1] ggg_temp, double complex[:, ::1] zzz_temp, double complex[:, ::1] bbb_temp):
+                 double complex[::1] ggg_temp, double complex[:, ::1] zzz_temp, double complex[:, ::1] bbb_temp) noexcept nogil:
     # * the code below is directly modified from the FK code
-    cdef Py_ssize_t index, ilayer
+    cdef Py_ssize_t index, ilayer, imat, jmat
 
     # * Explanations:
     # ? aaa --- 4x4 p-sv Haskell matrix and a(5,5)=exb.
@@ -440,7 +577,7 @@ cdef void kernel(double k, double complex[:, ::1] u, double complex[::1] kp, dou
         u[index, 2] = u[index, 2] + val * zzz[index, 4] / love
 
 
-cdef inline(double complex, double complex, double complex, double) sh_ch(double complex a, double kd) nogil:
+cdef inline(double complex, double complex, double complex, double) sh_ch(double complex a, double kd) noexcept nogil:
     # ? compute c=cosh(a*kd); y=sinh(a*kd)/a; x=sinh(a*kd)*a
     # ? and multiply them by ex=exp(-Real(a*kd)) to supress overflow
     cdef:
@@ -458,7 +595,7 @@ cdef inline(double complex, double complex, double complex, double) sh_ch(double
     x = x * a
     return c, y, x, ex
 
-cdef inline void initialG(double complex[::1] ggg, double complex r, double complex ra, double complex rb, double complex r1, double mu2):
+cdef inline void initialG(double complex[::1] ggg, double complex r, double complex ra, double complex rb, double complex r1, double mu2) noexcept nogil:
     cdef double complex delta
 
     delta = r * (1. - ra * rb) - 1.
@@ -471,7 +608,7 @@ cdef inline void initialG(double complex[::1] ggg, double complex r, double comp
     ggg[5] = -1.
     ggg[6] = 2. / (rb * mu2)
 
-cdef inline void eVector(double complex[::1] eee, double complex ra, double complex rb, double complex r1, double mu2):
+cdef inline void eVector(double complex[::1] eee, double complex ra, double complex rb, double complex r1, double mu2) noexcept nogil:
     eee[0] = ra * rb - 1.
     eee[1] = mu2 * rb * (1. - r1)
     eee[2] = mu2 * (r1 - ra * rb)
@@ -483,7 +620,7 @@ cdef inline void eVector(double complex[::1] eee, double complex ra, double comp
 
 cdef inline void compoundMatrix(double complex[:, ::1] ccc, double complex Ca, double complex Ya, double complex Xa, double complex Cb,
                                 double complex Yb, double complex Xb, double exa, double exb, double complex r, double complex r1,
-                                double complex r2, double complex r3, double mu2):
+                                double complex r2, double complex r3, double mu2) noexcept nogil:
     cdef:
         double complex CaCb, CaYb, CaXb, XaCb, XaXb, YaCb, YaYb
         double ex
@@ -542,7 +679,7 @@ cdef inline void compoundMatrix(double complex[:, ::1] ccc, double complex Ca, d
     ccc[6, 5] = -mu2 * Xb / 2.
     ccc[6, 6] = Cb
 
-cdef inline void propagateG(double complex[::1] ggg, double complex[:, ::1] ccc, double complex[::1] ggg_temp):
+cdef inline void propagateG(double complex[::1] ggg, double complex[:, ::1] ccc, double complex[::1] ggg_temp) noexcept nogil:
     cdef Py_ssize_t imat, jmat
 
     ggg_temp[:] = 0. + 0.j
@@ -554,7 +691,7 @@ cdef inline void propagateG(double complex[::1] ggg, double complex[:, ::1] ccc,
 
 
 cdef inline void separatS(double complex[:, ::1] sss, int updn, int src_type, double complex ra, double complex rb,
-                          double complex r, double mu2, double complex[:, ::1] temppp, double complex r1, double[:, :] si):
+                          double complex r, double mu2, double complex[:, ::1] temppp, double complex r1, double[:, :] si) noexcept nogil:
     cdef:
         int isrc_type
         double complex ra1, rb1, dum, temp_sh
@@ -613,7 +750,7 @@ cdef inline void separatS(double complex[:, ::1] sss, int updn, int src_type, do
             sss[imat, 4] = (si[imat, 4] + temp_sh * si[imat, 5]) / 2.
             sss[imat, 5] = (si[imat, 5] + si[imat, 4] / temp_sh) / 2.
 
-cdef inline void initialZ(double complex[:, ::1] zzz, double complex[::1] ggg, double complex[:, ::1] sss):
+cdef inline void initialZ(double complex[:, ::1] zzz, double complex[::1] ggg, double complex[:, ::1] sss) noexcept nogil:
     cdef Py_ssize_t index
     for index in range(3):
         # c for p-sv, see WH p1018
@@ -630,7 +767,7 @@ cdef inline void initialZ(double complex[:, ::1] zzz, double complex[::1] ggg, d
 
 
 cdef inline void haskellMatrix(double complex[:, ::1] aaa, double complex Ca, double complex Ya, double complex Xa, double complex Cb,
-                               double complex Yb, double complex Xb, double exa, double exb, double complex r, double complex r1,  double mu2):
+                               double complex Yb, double complex Xb, double exa, double exb, double complex r, double complex r1,  double mu2) noexcept nogil:
     Ca = Ca * exb
     Xa = Xa * exb
     Ya = Ya * exb
@@ -662,7 +799,7 @@ cdef inline void haskellMatrix(double complex[:, ::1] aaa, double complex Ca, do
     # c sh, the Haskell matrix is not needed. it is replaced by exb
     aaa[4, 4] = exb
 
-cdef inline void propagateZ(double complex[:, ::1] zzz, double complex[:, ::1] aaa, double complex[:, ::1] zzz_temp):
+cdef inline void propagateZ(double complex[:, ::1] zzz, double complex[:, ::1] aaa, double complex[:, ::1] zzz_temp) noexcept nogil:
     cdef Py_ssize_t imat, jmat, kmat
 
     zzz_temp[:, :] = 0. + 0.j
@@ -673,7 +810,7 @@ cdef inline void propagateZ(double complex[:, ::1] zzz, double complex[:, ::1] a
                                                 kmat] + zzz[imat, jmat] * aaa[jmat, kmat]
     zzz[:, :] = zzz_temp[:, :]
 
-cdef inline void propagateB(double complex[:, :] bbb, double complex[:, :] ccc, double complex[:, :] bbb_temp):
+cdef inline void propagateB(double complex[:, :] bbb, double complex[:, :] ccc, double complex[:, :] bbb_temp) noexcept nogil:
 
     cdef Py_ssize_t imat, jmat, kmat
 
